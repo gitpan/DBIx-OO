@@ -6,7 +6,7 @@ use warnings;
 use strict;
 use Carp;
 
-use version; our $VERSION = qv('0.0.1');
+use version; our $VERSION = qv('0.0.2');
 
 use DBI ();
 use SQL::Abstract ();
@@ -1060,6 +1060,38 @@ sub create {
     return $obj;
 }
 
+=head2 C<init_from_data($data)>
+
+Initializes one or more objects from the given data.  $data can be a
+hashref (in which case a single object will be created and returned)
+or an arrayref (multiple objects will be created and returned as an
+array reference).
+
+The hashes simply contain the data, as retrieved from the database.
+That is, map column name to field value.
+
+This method is convenient in those cases where you already have the
+data (suppose you SELECT-ed it in a different way than using DBIx::OO)
+and want to initialize DBIx::OO objects without the penalty of going
+through the DB again.
+
+=cut
+
+sub init_from_data {
+    my ($class, $data) = @_;
+    if (ref $data eq 'ARRAY') {
+        my @a = ();
+        foreach my $h (@$data) {
+            push @a, $class->init_from_data($h);
+        }
+        return \@a;
+    } else {
+        my $obj = $class->new;
+        $obj->{values} = $data;
+        return $obj;
+    }
+}
+
 =head2 C<retrieve>
 
     my $u = Users->retrieve('foo');
@@ -1285,7 +1317,6 @@ sub count {
 sub _get_pk_where {
     my ($self) = @_;
     my $pc = $self->columns('P');
-    my @pv = $self->get(@$pc);
     my %where = ();
     @where{@$pc} = @{$self->{values}}{@$pc};
     return \%where;
@@ -1293,15 +1324,19 @@ sub _get_pk_where {
 
 sub _run_sql {
     my ($class, $sql, $bind) = @_;
-#     {
-#         ## DEBUG
-#         no warnings 'uninitialized';
-#         my @a = map { defined $_ ? $_ : 'NULL' } @$bind;
-#         print STDERR "\033[1;33mSQL: $sql\nVAL: ", join(", ", @a), "\n\033[0m";
-#     }
+#      {
+#          ## DEBUG
+#          no warnings 'uninitialized';
+#          my @a = map { defined $_ ? $_ : 'NULL' } @$bind;
+#          print STDERR "\033[1;33mSQL: $sql\nVAL: ", join(", ", @a), "\n\033[0m";
+#      }
     my $dbh = $class->get_dbh;
     my $sth = $dbh->prepare($sql);
-    $sth->execute(@$bind);
+    if ($bind) {
+        $sth->execute(@$bind);
+    } else {
+        $sth->execute();
+    }
     return $sth;
 }
 
@@ -1466,7 +1501,7 @@ sub order_and_limit {
     my $q = $order ? $self->_order_by($order) : '';
     if (defined $limit) {
         $q .= " LIMIT $limit";
-        $q .= ",$offset"
+        $q .= " OFFSET $offset"
           if defined $offset;
     }
     return $q;
@@ -1550,7 +1585,7 @@ Yeah, the documentation sucks.  Other bugs?
 
 =head1 SEE ALSO
 
-L<SQL::Abstract|SQL::Abstract>, L<Class::DBI|Class::DBI>
+L<SQL::Abstract>, L<Class::DBI>, L<DBIx::Class>
 
 =head1 AUTHOR
 
