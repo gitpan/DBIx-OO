@@ -1,5 +1,10 @@
 Revision history for DBIx-OO
 
+0.0.3    Nov 25, 2006
+         Minor fixes to DBIx::OO.  Added DBIx::OO::Tree to facilitate
+         manipulation of hierarchical data using the "nested sets
+         model".
+
 0.0.1    Oct 18, 2006
          First version, released on an unsuspecting world.
 
