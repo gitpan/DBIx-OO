@@ -15,6 +15,8 @@ require Exporter;
                 tree_get_subtree
                 tree_compute_levels
                 tree_reparent
+                tree_move_after
+                tree_move_before
                 tree_delete
                 tree_get_path
            );
@@ -47,6 +49,7 @@ DBIx::OO::Tree -- manipulate hierarchical data using the "nested sets" model
     use base 'DBIx::OO';
     use DBIx::OO::Tree;
 
+    __PACKAGE__->table('Categories');
     __PACKAGE__->columns(P => [ 'id' ],
                          E => [ 'label', 'parent' ]);
 
@@ -66,7 +69,7 @@ DBIx::OO::Tree -- manipulate hierarchical data using the "nested sets" model
     my $mp3 = $portable->tree_append({ label => 'mp3 players' });
     my $flash = $mp3->tree_append({ label => 'flash' });
     my $cds = $portable->tree_append({ label => 'cd players' });
-    my $radios = Category->tree_append($electronics->id,
+    my $radios = Category->tree_append($portable->id,
                                        { label => '2 way radios' });
 
     # fetch and display a subtree
@@ -94,6 +97,10 @@ DBIx::OO::Tree -- manipulate hierarchical data using the "nested sets" model
 
     $mp3->tree_reparent($lcd->id);
     $tvs->tree_reparent($portable->id);
+    $cds->tree_reparent(undef);
+
+    $plasma->tree_move_before($tube->id);
+    $portable->tree_move_before($electronics->id);
 
     # delete nodes
 
@@ -150,12 +157,14 @@ but we can't enforce this in our module.
 
 =head1 API
 
-=head2 tree_append([ $parent_id ], $values)
+=head2 tree_append($parent_id, \%values)
 
-Appens a new node in the subtree of the specified parent.  If
+Appends a new node in the subtree of the specified parent.  If
 $parent_id is undef, it will add a root node.  When you want to add a
 root node you can as well omit specifying the $parent_id (our code
 will realize that the first argument is a reference).
+
+$values is a hash as required by DBIx::OO::create().
 
 Examples:
 
@@ -187,10 +196,12 @@ sub tree_append {
         $parent = $self->id;
     } else {
         $parent = shift;
-        if (ref $parent) {
+        if (ref $parent eq 'HASH') {
             # assuming $val and no parent
             $val = $parent;
             $parent = undef;
+        } elsif (ref $parent) {
+            $parent = $parent->id;
         }
     }
     $val ||= shift;
@@ -199,31 +210,28 @@ sub tree_append {
     my $dbh = $self->get_dbh;
     my $table = $self->table;
 
-    #    $self->transaction_start;
-
     if (defined $parent) {
         my $a = $dbh->selectrow_arrayref("SELECT rgt FROM `$table` WHERE id = $parent");
         $orig = $a->[0] - 1;
+        $dbh->do("UPDATE `$table` SET rgt = rgt + 2 WHERE rgt > $orig");
+        $dbh->do("UPDATE `$table` SET lft = lft + 2 WHERE lft > $orig");
+    } else {
+        my $a = $dbh->selectrow_arrayref("SELECT MAX(rgt) FROM `$table` WHERE parent IS NULL");
+        $orig = $a ? ($a->[0] || 0) : 0;
     }
-
-    $dbh->do("UPDATE `$table` SET rgt = rgt + 2 WHERE rgt > $orig");
-    $dbh->do("UPDATE `$table` SET lft = lft + 2 WHERE lft > $orig");
 
     my %args = ( lft     => $orig + 1,
                  rgt     => $orig + 2,
                  parent  => $parent );
     @args{keys %$val} = values %$val
       if $val;
-    my $node = $self->create(\%args);
-
-    #    $self->transaction_commit;
-    return $node;
+    return $self->create(\%args);
 }
 
-=head2 tree_insert_before, tree_insert_after
+=head2 tree_insert_before, tree_insert_after  ($anchor, \%values)
 
 Similar in function to tree_append, but these functions allow you to
-insert a node before or after a specified node (let's call it anchor).
+insert a node before or after a specified node ($anchor).
 
 Examples:
 
@@ -256,8 +264,6 @@ sub tree_insert_before {
     my $dbh = $self->get_dbh;
     my $table = $self->table;
 
-    #    $self->transaction_start;
-
     my $a = $dbh->selectrow_arrayref("SELECT lft, parent FROM `$table` WHERE id = $pos");
     my ($orig, $parent) = @$a;
 
@@ -269,10 +275,7 @@ sub tree_insert_before {
                  parent  => $parent );
     @args{keys %$val} = values %$val
       if $val;
-    my $node = $self->create(\%args);
-
-    #    $self->transaction_commit;
-    return $node;
+    return $self->create(\%args);
 }
 
 sub tree_insert_after {
@@ -291,8 +294,6 @@ sub tree_insert_after {
     my $dbh = $self->get_dbh;
     my $table = $self->table;
 
-    #    $self->transaction_start;
-
     my $a = $dbh->selectrow_arrayref("SELECT rgt, parent FROM `$table` WHERE id = $pos");
     my ($orig, $parent) = @$a;
 
@@ -304,18 +305,26 @@ sub tree_insert_after {
                  parent  => $parent );
     @args{keys %$val} = values %$val
       if $val;
-    my $node = $self->create(\%args);
-
-    #    $self->transaction_commit;
-    return $node;
+    return $self->create(\%args);
 }
 
 =head2 tree_reparent($source_id, $dest_id)
 
-This function will remove the $source node from it's current parent
+This function will remove the $source node from its current parent
 and append it to the $dest node.  As with the other functions, you can
 call it both as a package method or as an object method.  When you
 call it as an object method, it's not necessary to specify $source.
+
+You can specify I<undef> for $dest_id, in which case $source will
+become a root node (as if it would be appended with
+tree_append(undef)).
+
+No nodes are DELETE-ed nor INSERT-ed by this function.  It simply
+moves I<existing> nodes, which means that any node ID-s that you
+happen to have should remain valid and point to the same nodes.
+However, the tree structure is changed, so if you maintain the tree in
+memory you have to update it after calling this funciton.  Same
+applies to tree_move_before() and tree_move_after().
 
 Examples:
 
@@ -327,11 +336,15 @@ Examples:
 This function does a lot of work in order to maintain the tree
 integrity, therefore it might be slow.
 
-Also, note that it doesn't do any safety checks to make sure moving
-the node is allowed.  For instance, you can't move a node to one of
-it's child nodes.
+NOTE: it doesn't do any safety checks to make sure moving the node is
+allowed.  For instance, you can't move a node to one of its child
+nodes.
 
 =cut
+
+# sub _check_can_move {
+#     my ($src_lft, $dest_lft, $dest_rgt) = @_;
+# }
 
 sub tree_reparent {
     my $self = shift;
@@ -349,7 +362,69 @@ sub tree_reparent {
     my $dbh = $self->get_dbh;
     my $table = $self->table;
 
-    #    $self->transaction_start;
+    # get source info
+    my $a = $dbh->selectrow_arrayref("SELECT lft, rgt FROM `$table` WHERE id = $source");
+    my ($orig_left, $orig_right) = @$a;
+    my $width = $orig_right - $orig_left + 1;
+
+    # hint to ignore subtree items in further computation
+    $dbh->do("UPDATE `$table` SET mvg = 1 WHERE lft BETWEEN $orig_left AND $orig_right");
+
+    # "collapse" tree by reducing rgt and lft for nodes after the removed one
+    $dbh->do("UPDATE `$table` SET rgt = rgt - $width WHERE rgt > $orig_right");
+    $dbh->do("UPDATE `$table` SET lft = lft - $width WHERE lft > $orig_right");
+
+    my $diff;
+
+    if (defined $dest) {
+        # get destination info (it's important to do it here as it can be modified by the UPDATE-s above)
+        $a = $dbh->selectrow_arrayref("SELECT rgt FROM `$table` WHERE id = $dest");
+        my ($dest_right) = @$a;
+        $diff = $dest_right - $orig_left;
+
+        $dbh->do("UPDATE `$table` SET rgt = rgt + $width WHERE NOT mvg AND rgt >= $dest_right");
+        $dbh->do("UPDATE `$table` SET lft = lft + $width WHERE NOT mvg AND lft >= $dest_right");
+    } else {
+        # appending a root node
+        my $a = $dbh->selectrow_arrayref("SELECT MAX(rgt) FROM `$table` WHERE parent IS NULL");
+        my ($dest_right) = @$a;
+        $diff = $dest_right - $orig_left + 1;
+        $dest = 'NULL';
+    }
+
+    # finally, update subtree items and remove the ignore hint
+    $dbh->do("UPDATE `$table` SET lft = lft + $diff, rgt = rgt + $diff, mvg = 0 WHERE mvg");
+    $dbh->do("UPDATE `$table` SET parent = $dest WHERE id = $source");
+}
+
+=head2 tree_move_before, tree_move_after  ($source_id, $anchor_id)
+
+These functions are similar to a reparent operation, but they allow
+one to specify I<where> to put the $source node, in the subtree of
+$anchor's parent.  See tree_reparent().
+
+Examples:
+
+    $portable->tree_move_before($electronics->id);
+    Category->tree_move_after($lcd->id, $flash->id);
+
+=cut
+
+sub tree_move_before {
+    my ($self) = shift;
+    my ($source, $anchor);
+    if (ref $self) {
+        $source = $self->id;
+    } else {
+        $source = shift;
+    }
+    $anchor = shift;
+
+    Carp::croak('arguments MUST be scalars (source and destination parent node IDs)')
+        if ref $anchor or ref $source;
+
+    my $dbh = $self->get_dbh;
+    my $table = $self->table;
 
     # get source info
     my $a = $dbh->selectrow_arrayref("SELECT lft, rgt FROM `$table` WHERE id = $source");
@@ -364,18 +439,63 @@ sub tree_reparent {
     $dbh->do("UPDATE `$table` SET lft = lft - $width WHERE lft > $orig_right");
 
     # get destination info (it's important to do it here as it can be modified by the UPDATE-s above)
-    $a = $dbh->selectrow_arrayref("SELECT rgt FROM `$table` WHERE id = $dest");
-    my ($dest_right) = @$a;
-    my $diff = $dest_right - $orig_left;
+    $a = $dbh->selectrow_arrayref("SELECT lft, parent FROM `$table` WHERE id = $anchor");
+    my ($dest_left, $dest_parent) = @$a;
+    if (!defined $dest_parent) {
+        $dest_parent = 'NULL';
+    }
+    my $diff = $dest_left - $orig_left;
 
-    $dbh->do("UPDATE `$table` SET rgt = rgt + $width WHERE NOT mvg AND rgt >= $dest_right");
-    $dbh->do("UPDATE `$table` SET lft = lft + $width WHERE NOT mvg AND lft >= $dest_right");
+    $dbh->do("UPDATE `$table` SET rgt = rgt + $width WHERE NOT mvg AND rgt >= $dest_left");
+    $dbh->do("UPDATE `$table` SET lft = lft + $width WHERE NOT mvg AND lft >= $dest_left");
 
     # finally, update subtree items and remove the ignore hint
     $dbh->do("UPDATE `$table` SET lft = lft + $diff, rgt = rgt + $diff, mvg = 0 WHERE mvg");
-    $dbh->do("UPDATE `$table` SET parent = $dest WHERE id = $source");
+    $dbh->do("UPDATE `$table` SET parent = $dest_parent WHERE id = $source");
+}
 
-    #    $self->transaction_commit;
+sub tree_move_after {
+    my ($self) = shift;
+    my ($source, $anchor);
+    if (ref $self) {
+        $source = $self->id;
+    } else {
+        $source = shift;
+    }
+    $anchor = shift;
+
+    Carp::croak('arguments MUST be scalars (source and destination parent node IDs)')
+        if ref $anchor or ref $source;
+
+    my $dbh = $self->get_dbh;
+    my $table = $self->table;
+
+    # get source info
+    my $a = $dbh->selectrow_arrayref("SELECT lft, rgt FROM `$table` WHERE id = $source");
+    my ($orig_left, $orig_right) = @$a;
+    my $width = $orig_right - $orig_left + 1;
+
+    # hint to ignore subtree items in further computation
+    $dbh->do("UPDATE `$table` SET mvg = 1 WHERE lft BETWEEN $orig_left AND $orig_right");
+
+    # "collapse" tree by reducing rgt and lft for nodes after the removed one
+    $dbh->do("UPDATE `$table` SET rgt = rgt - $width WHERE rgt > $orig_right");
+    $dbh->do("UPDATE `$table` SET lft = lft - $width WHERE lft > $orig_right");
+
+    # get destination info (it's important to do it here as it can be modified by the UPDATE-s above)
+    $a = $dbh->selectrow_arrayref("SELECT rgt, parent FROM `$table` WHERE id = $anchor");
+    my ($dest_right, $dest_parent) = @$a;
+    if (!defined $dest_parent) {
+        $dest_parent = 'NULL';
+    }
+    my $diff = $dest_right + 1 - $orig_left;
+
+    $dbh->do("UPDATE `$table` SET rgt = rgt + $width WHERE NOT mvg AND rgt > $dest_right");
+    $dbh->do("UPDATE `$table` SET lft = lft + $width WHERE NOT mvg AND lft > $dest_right");
+
+    # finally, update subtree items and remove the ignore hint
+    $dbh->do("UPDATE `$table` SET lft = lft + $diff, rgt = rgt + $diff, mvg = 0 WHERE mvg");
+    $dbh->do("UPDATE `$table` SET parent = $dest_parent WHERE id = $source");
 }
 
 =head2 tree_delete($node_id)
@@ -405,16 +525,12 @@ sub tree_delete {
     my ($left, $right) = @$a;
     my $width = $right - $left + 1;
 
-    #    $self->transaction_start;
-
     $dbh->do("DELETE FROM `$table` WHERE lft BETWEEN $left AND $right");
     $dbh->do("UPDATE `$table` SET rgt = rgt - $width WHERE rgt > $right");
     $dbh->do("UPDATE `$table` SET lft = lft - $width WHERE lft > $right");
-
-    #    $self->transaction_commit;
 }
 
-=head2 tree_get_subtree($args)
+=head2 tree_get_subtree(\%args)
 
 Retrieves the full subtree of a specified node.  $args is a hashref
 that can contain:
@@ -514,6 +630,8 @@ sub tree_get_subtree {
     my @bind;
     if ($where) {
         ($where, @bind) = $sa->where($where);
+    } else {
+        $where = '';
     }
     my $table = $self->table;
     my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS TREE_NODE INNER JOIN `$table` AS TREE_PARENT " .
@@ -531,7 +649,7 @@ sub tree_get_subtree {
     return wantarray ? @ret : \@ret;
 }
 
-=head2 tree_get_path($args)
+=head2 tree_get_path(\%args)
 
 Retrieves the path of a given node.  $args is an hashref that can
 contain:
@@ -579,7 +697,7 @@ tree_get_subtree or tree_get_path).
 This is generic, and it's simply for convenience--in particular cases
 you might find it faster to compute the levels yourself.
 
-It returns an hashref that maps node ID to it's level.
+It returns an hashref that maps node ID to its level.
 
 In [1] we can see there is a method to compute the subtree depth
 directly in SQL, I will paste the relevant code here:
@@ -627,10 +745,6 @@ sub tree_compute_levels {
 
 =head1 TODO
 
- - Make tree_reparent able to insert the node in a new parent at a
-   specified position (currently it's only able to append the node to
-   its new parent).
-
  - Allow custom names for the required fields (lft, rgt, mvg, id,
    parent).
 
@@ -639,8 +753,8 @@ sub tree_compute_levels {
 
 =head1 REFERENCES
 
-[1] MySQL AB: Managing Hierarchical Data in MySQL, by Mike Hillyer
-    http://dev.mysql.com/tech-resources/articles/hierarchical-data.htm
+ [1] MySQL AB: Managing Hierarchical Data in MySQL, by Mike Hillyer
+     http://dev.mysql.com/tech-resources/articles/hierarchical-data.html
 
 =head1 SEE ALSO
 
