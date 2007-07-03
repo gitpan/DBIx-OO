@@ -6,7 +6,7 @@ use warnings;
 use strict;
 use Carp;
 
-use version; our $VERSION = qv('0.0.4');
+use version; our $VERSION = qv('0.0.5');
 
 use DBI ();
 use SQL::Abstract ();
@@ -341,6 +341,26 @@ sub columns {
     return $h;
 }
 
+=head2 C<clone_columns(@except)>
+
+Though public, it's likely you won't need this function.  It returns
+a list of column names that would be cloned in a clone() operation.
+By default it excludes any columns in the "B<P>" group (primary keys)
+but you can pass a list of other names to exclude as well.
+
+=cut
+
+sub clone_columns {
+    my ($class) = __T(shift);
+    my %except;
+    if (@_) {
+        @except{@_} = @_;
+    }
+    my $all = $class->columns;
+    $all = [ grep { !exists($except{$_}) and $class->__dboo_colgroups->{$_} ne 'P' } @$all ];
+    return $all;
+}
+
 =head2 C<defaults(%hash)>
 
 Using this function you can declare some default values for your
@@ -466,7 +486,7 @@ sub __COL_CLOSURE {
     my ($col) = @_;
     sub {
         my $self = shift;
-        @_ > 0 ? $self->set($col, $_[0]) : $self->get($col);
+        @_ > 0 ? $self->set($col, @_) : $self->get($col);
     };
 }
 
@@ -1033,21 +1053,22 @@ pass a hash by value as well.
 =cut
 
 sub create {
-    my $class = __T(shift);
+    my $self = shift;
     my %val = ref $_[0] eq 'HASH' ? %{$_[0]} : @_;
+    my $class = __T($self);
 
     my $obj = $class->new;
     $obj->before_set(\%val, 1);
     $obj->{values} = \%val;
     $obj->_apply_defaults;
 
-    my $sa = $class->get_sql_abstract;
-    my ($sql, @bind) = $sa->insert($class->table, \%val);
-    my $dbh = $class->get_dbh;
-    $class->_run_sql($sql, \@bind);
+    my $sa = $self->get_sql_abstract;
+    my ($sql, @bind) = $sa->insert($self->table, \%val);
+    my $dbh = $self->get_dbh;
+    $self->_run_sql($sql, \@bind);
 
-    my $pk = $class->columns('P');
-    $val{$pk->[0]} = $class->_get_last_id($dbh)
+    my $pk = $self->columns('P');
+    $val{$pk->[0]} = $self->_get_last_id($dbh)
       if @$pk == 1 && !exists $val{$pk->[0]};
 
     # since users may specify SQL functions using an array ref, we
@@ -1058,6 +1079,29 @@ sub create {
     }
 
     return $obj;
+}
+
+=head2 clone(@except)
+
+Clones an object, returning a hash (reference) suitable for create().
+Here's how you would call it:
+
+  my $val = $page->clone;
+  my $new_page = Pages->create($val);
+
+Or, supposing you don't want to copy the value of the "created" field:
+
+  my $val = $page->clone('created');
+  my $new_page = Pages->create($val);
+
+=cut
+
+sub clone {
+    my ($self, @except) = @_;
+    my %val;
+    my $cols = $self->clone_columns(@except);
+    @val{@$cols} = $self->get(@$cols);
+    return \%val;
 }
 
 =head2 C<init_from_data($data)>
@@ -1287,8 +1331,7 @@ sub get_sql_abstract {
     my $sa = $class->__dboo_sqlabstract;
     if (!defined $sa) {
         $sa = SQL::Abstract::WithLimit->new(quote_char => '`',    # NOTE: MySQL quote style
-                                            name_sep   => '.',
-                                            logic      => 'and');
+                                            name_sep   => '.');
         $class->__dboo_sqlabstract($sa);
     }
     return $sa;
@@ -1324,12 +1367,12 @@ sub _get_pk_where {
 
 sub _run_sql {
     my ($class, $sql, $bind) = @_;
-#      {
-#          ## DEBUG
-#          no warnings 'uninitialized';
-#          my @a = map { defined $_ ? $_ : 'NULL' } @$bind;
-#          print STDERR "\033[1;33mSQL: $sql\nVAL: ", join(", ", @a), "\n\033[0m";
-#      }
+#     {
+#         ## DEBUG
+#         no warnings 'uninitialized';
+#         my @a = map { defined $_ ? $_ : 'NULL' } @$bind;
+#         print STDERR "\033[1;33mSQL: $sql\nVAL: ", join(", ", @a), "\n\033[0m";
+#     }
     my $dbh = $class->get_dbh;
     my $sth = $dbh->prepare($sql);
     if ($bind) {

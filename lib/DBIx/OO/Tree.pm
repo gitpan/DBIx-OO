@@ -19,6 +19,10 @@ require Exporter;
                 tree_move_before
                 tree_delete
                 tree_get_path
+                tree_get_next_sibling
+                tree_get_prev_sibling
+                tree_get_next
+                tree_get_prev
            );
 
 =head1 NAME
@@ -143,6 +147,12 @@ integrity.  Here's what happens currently:
  - tree_reparent -- executes 2 SELECT-s and 7 UPDATE-s.  I know, this
    sounds horrible--if you have better ideas I'd love to hear them.
 
+B<Note:> this module could well work with Class::DBI, although it is
+untested.  You just need to provide the get_dbh() method to your
+packages, comply to this module's table requirements (i.e. provide the
+right columns) and it should work just fine.  Any success/failure
+stories are welcome.
+
 =head1 DATABASE INTEGRITY
 
 Since the functions that update the database need to run multiple
@@ -220,6 +230,11 @@ sub tree_append {
         $orig = $a ? ($a->[0] || 0) : 0;
     }
 
+    delete $val->{lft};
+    delete $val->{rgt};
+    delete $val->{mvg};
+    delete $val->{parent};
+
     my %args = ( lft     => $orig + 1,
                  rgt     => $orig + 2,
                  parent  => $parent );
@@ -270,6 +285,11 @@ sub tree_insert_before {
     $dbh->do("UPDATE `$table` SET rgt = rgt + 2 WHERE rgt >= $orig");
     $dbh->do("UPDATE `$table` SET lft = lft + 2 WHERE lft >= $orig");
 
+    delete $val->{lft};
+    delete $val->{rgt};
+    delete $val->{mvg};
+    delete $val->{parent};
+
     my %args = ( lft     => $orig,
                  rgt     => $orig + 1,
                  parent  => $parent );
@@ -299,6 +319,11 @@ sub tree_insert_after {
 
     $dbh->do("UPDATE `$table` SET rgt = rgt + 2 WHERE rgt > $orig");
     $dbh->do("UPDATE `$table` SET lft = lft + 2 WHERE lft > $orig");
+
+    delete $val->{lft};
+    delete $val->{rgt};
+    delete $val->{mvg};
+    delete $val->{parent};
 
     my %args = ( lft     => $orig + 1,
                  rgt     => $orig + 2,
@@ -622,7 +647,7 @@ sub tree_get_subtree {
         $where ||= {};
         $where->{'TREE_PARENT.id'} = $parent;
     }
-    my @keys = qw(id parent);
+    my @keys = qw(id parent lft rgt);
     push @keys, @{$args->{fields}}
       if ($args->{fields});
     my @fields = map { "TREE_NODE.`$_`" } @keys;
@@ -670,14 +695,14 @@ sub tree_get_path {
     } elsif (ref $self) {
         $id = $self->id;
     }
-    my @keys = qw(id parent);
+    my @keys = qw(id parent lft rgt);
     push @keys, @{$args->{fields}}
       if ($args->{fields});
     my @fields = map { "TREE_PARENT.`$_`" } @keys;
     my $table = $self->table;
     my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS TREE_NODE INNER JOIN `$table` AS TREE_PARENT " .
       'ON TREE_NODE.lft BETWEEN TREE_PARENT.lft AND TREE_PARENT.rgt' .
-        " WHERE TREE_NODE.id = $id ORDER BY TREE_NODE.lft";
+        " WHERE TREE_NODE.id = $id ORDER BY TREE_PARENT.lft";
     my $sth = $self->_run_sql($select);
     my @ret = ();
     while (my $row = $sth->fetchrow_arrayref) {
@@ -686,6 +711,124 @@ sub tree_get_path {
         push @ret, \%h;
     }
     return wantarray ? @ret : \@ret;
+}
+
+sub tree_get_next_sibling {
+    my ($self, $args) = @_;
+    my $id;
+    if (defined $args->{id}) {
+        $id = $args->{id};
+    } elsif (ref $self) {
+        $id = $self->id;
+    }
+    my @keys = qw(id parent lft rgt);
+    push @keys, @{$args->{fields}}
+      if ($args->{fields});
+    my @fields = map { "T1.`$_`" } @keys;
+    my $table = $self->table;
+    my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS T1 INNER JOIN `$table` AS T2 " .
+      'ON T1.lft = T2.rgt + 1' .
+        " WHERE T2.id = $id LIMIT 1";
+    my $sth = $self->_run_sql($select);
+    my @ret = ();
+    my $row = $sth->fetchrow_arrayref;
+    if ($row) {
+        my %h;
+        @h{@keys} = @$row;
+        return \%h;
+    }
+    return undef;
+}
+
+sub tree_get_prev_sibling {
+    my ($self, $args) = @_;
+    my $id;
+    if (defined $args->{id}) {
+        $id = $args->{id};
+    } elsif (ref $self) {
+        $id = $self->id;
+    }
+    my @keys = qw(id parent lft rgt);
+    push @keys, @{$args->{fields}}
+      if ($args->{fields});
+    my @fields = map { "T1.`$_`" } @keys;
+    my $table = $self->table;
+    my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS T1 INNER JOIN `$table` AS T2 " .
+      'ON T1.rgt = T2.lft - 1' .
+        " WHERE T2.id = $id LIMIT 1";
+    my $sth = $self->_run_sql($select);
+    my @ret = ();
+    my $row = $sth->fetchrow_arrayref;
+    if ($row) {
+        my %h;
+        @h{@keys} = @$row;
+        return \%h;
+    }
+    return undef;
+}
+
+sub tree_get_next {
+    my ($self, $args) = @_;
+    my $id;
+    if (defined $args->{id}) {
+        $id = $args->{id};
+    } elsif (ref $self) {
+        $id = $self->id;
+    }
+    my $where = $args->{where};
+    my @bind;
+    my $sa = $self->get_sql_abstract;
+    if ($where) {
+        ($where, @bind) = $sa->where($where);
+    }
+    my @keys = qw(id parent lft rgt);
+    push @keys, @{$args->{fields}}
+      if ($args->{fields});
+    my @fields = map { "T1.`$_`" } @keys;
+    my $table = $self->table;
+    my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS T1 INNER JOIN `$table` AS T2 " .
+      "ON T1.lft > T2.lft AND T2.id = $id $where ORDER BY T1.lft LIMIT 1";
+    my $sth = $self->_run_sql($select, \@bind);
+    my @ret = ();
+    my $row = $sth->fetchrow_arrayref;
+    if ($row) {
+        my %h;
+        @h{@keys} = @$row;
+        return \%h;
+    }
+    return undef;
+}
+
+sub tree_get_prev {
+    my ($self, $args) = @_;
+    my $id;
+    if (defined $args->{id}) {
+        $id = $args->{id};
+    } elsif (ref $self) {
+        $id = $self->id;
+    }
+    my $where = $args->{where};
+    my @bind;
+    my $sa = $self->get_sql_abstract;
+    if ($where) {
+        ($where, @bind) = $sa->where($where);
+    }
+    my @keys = qw(id parent lft rgt);
+    push @keys, @{$args->{fields}}
+      if ($args->{fields});
+    my @fields = map { "T1.`$_`" } @keys;
+    my $table = $self->table;
+    my $select = 'SELECT ' . join(', ', @fields) . " FROM `$table` AS T1 INNER JOIN `$table` AS T2 " .
+      "ON T1.lft < T2.lft AND T2.id = $id $where ORDER BY T1.lft DESC LIMIT 1";
+    my $sth = $self->_run_sql($select, \@bind);
+    my @ret = ();
+    my $row = $sth->fetchrow_arrayref;
+    if ($row) {
+        my %h;
+        @h{@keys} = @$row;
+        return \%h;
+    }
+    return undef;
 }
 
 =head2 tree_compute_levels($data)
@@ -728,14 +871,23 @@ I find it horrible.
 sub tree_compute_levels {
     my ($self, $data) = @_;
     my %levels = ();
+    my @par;
+    my $l = 0;
     foreach my $h (@$data) {
-        my $l;
-        my $p = $h->{parent};
-        if (!defined $p) {
-            $l = 0;
-        } elsif (exists $levels{$p}) {
-            $l = $levels{$p} + 1;
+        while (@par > 0) {
+            my $prev = $par[$#par];
+            if ($h->{lft} < $prev->{rgt}) {
+                # contained
+                ++$l;
+                last;
+            } else {
+                pop @par;
+                if (@par) {
+                    --$l;
+                }
+            }
         }
+        push @par, $h;
         $levels{$h->{id}} = $l;
     }
     return \%levels;
