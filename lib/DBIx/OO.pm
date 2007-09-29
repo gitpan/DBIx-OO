@@ -6,7 +6,7 @@ use warnings;
 use strict;
 use Carp;
 
-use version; our $VERSION = qv('0.0.5');
+use version; our $VERSION = qv('0.0.6');
 
 use DBI ();
 use SQL::Abstract ();
@@ -1502,57 +1502,201 @@ sub DESTROY {
     }
 }
 
+## database autocreate/update facility
+
+=head2 C<autocreate(@packages)>
+
+You can use this facility to automatically create / upgrade your
+database.  It takes a very simple (rudimentary even) approach, but we
+found it to be useful.  Here's the "big" idea.
+
+    package MyDB::Users;
+    use base 'MyDB';
+
+    __PACKAGE__->table('Users');
+    __PACKAGE__->columns(P => [ 'id' ],
+                         E => [qw/ first_name last_name /]);
 
 
+    sub get_autocreate_data {q{
+    #### (users:0) ####
 
+    CREATE TABLE Users ( id VARCHAR(32) NOT NULL PRIMARY KEY,
+                         first_name VARCHAR(64),
+                         last_name VARCHAR(64) );
 
+    # you can put Perl comments too.
 
+    CREATE INDEX idx_Users_first_name ON Users(first_name)
+    }}
 
+OK, now you can write this make_database.pl script:
 
+    /usr/bin/perl -w
 
+    use MyDB;
+    MyDB->autocreate(qw( MyDB::Users ));
 
-package SQL::Abstract::WithLimit;
-use base 'SQL::Abstract';
+When you run this script the first time, it will create the Users
+table.  (An internal _dbix_oo_versions table gets created as well;
+we're using it inside DBIx::OO in order to keep track of existing
+table versions).  Note that if you run it again, it doesn't do
+anything--the database is up to date.
 
-### MySQL and Postgres syntax; Buzz off for others. :-p
-sub select {
-    my ($self, $table, $cols, $where, $order, $limit, $offset) = @_;
-    my ($sql, @bind) = $self->SUPER::select($table, $cols, $where, $order);
-    $sql .= $self->order_and_limit(undef, $limit, $offset);
-    return wantarray ? ($sql, @bind) : $sql;
-}
+Later.  You sold a billion copies of your software, customers are
+happy but they are crying loud for an "email" field in their user
+profiles, also wondering what was your idea to index on first_name and
+not on last_name!  In order to make it easy for them to upgrade their
+databases, you need to modify MyDB::Users.  Besides declaring the
+'email' column using __PACKAGE__->columns, B<append> the following to
+your get_autocreate_data section:
 
-sub _order_by {
-    my $self = shift;
-    my $ref = ref $_[0];
+    #### (users:1) ####
 
-    my @vals = $ref eq 'ARRAY'  ? @{$_[0]} :
-               $ref eq 'SCALAR' ? ${$_[0]} :
-               $ref eq ''       ? $_[0]    :
-               SQL::Abstract::puke("Unsupported data struct $ref for ORDER BY");
+    # (note that we incremented the version number)
 
-    my $val = join ', ', map {
-        s/^\^// ?
-          $self->_quote($_) . $self->_sqlcase(' desc')
-            : $self->_quote($_)
-        } @vals;
-    return $val ? $self->_sqlcase(' order by')." $val" : '';
-}
+    # add the 'email' field
+    ALTER TABLE Users ADD (email VARCHAR(128));
 
-sub order_and_limit {
-    my ($self, $order, $limit, $offset) = @_;
-    my $q = $order ? $self->_order_by($order) : '';
-    if (defined $limit) {
-        $q .= " LIMIT $limit";
-        $q .= " OFFSET $offset"
-          if defined $offset;
+    # index it
+    CREATE UNIQUE INDEX idx_Users_email ON Users(email);
+
+    # and add that last_name index
+    CREATE INDEX idx_Users_last_name ON Users(last_name);
+
+Now you can just tell your users to run make_database.pl again and
+everything gets updated.
+
+The #### (foo:N) #### syntax is meant simply to declare an ID and a
+version number.  "foo" can be anything you want -- it doesn't have to
+be the table name.  You can actually create multiple tables, if you
+need to.
+
+=cut
+
+sub autocreate {
+    my ($class, @packages) = @_;
+    $class->transaction_start;
+    $class->disable_fk_checks;
+    eval {
+        use Module::Load qw( load );
+
+        # make sure _dbix_oo_versions gets created first
+        my @sql_lines = split(/^/m, get_autocreate_data());
+        $class->__do_autocreate(@sql_lines);
+
+        # autocreate other packages that were passed
+        foreach my $pak (@packages) {
+            load $pak;
+            eval {
+                @sql_lines = split(/^/m, $pak->get_autocreate_data());
+                $class->__do_autocreate(@sql_lines);
+            };
+        }
+    };
+    if ($@) {
+        $class->transaction_rollback;
+        print STDERR "\n\n*** There was a problem auto-creating or upgrading tables, can't continue ***\n\n";
+        die $@;
+    } else {
+        $class->transaction_commit;
     }
-    return $q;
+    $class->enable_fk_checks;
 }
 
-*quote_field = \&SQL::Abstract::_quote;
+sub get_autocreate_data {q{
+    #### (_dbix_oo_versions:0) ####
 
-1;
+    CREATE TABLE _dbix_oo_versions ( TB_name VARCHAR(255) PRIMARY KEY,
+                                     TB_version INTEGER UNSIGNED );
+}}
+
+my $AUTOCREATE_LINE_RE = qr/^\s*####\s*\(([a-z0-9_-]+):([0-9]+)\)\s*####\s*$/i;
+# my $AUTOCREATE_SPLIT_SQLS = qr/^\s*##\s*$/m;
+my $AUTOCREATE_SPLIT_SQLS = qr/;\s*$/m;
+my $AUTOCREATE_TABLES_TABLE = '_dbix_oo_versions';
+
+sub __do_autocreate {
+    my ($class, @lines) = @_;
+
+    my $tables = $class->__autocreate_parse_lines(\@lines);
+
+    my $dbh = $class->get_dbh;
+    my $sth = $dbh->table_info('', '', $AUTOCREATE_TABLES_TABLE);
+    my $existing_tables = $sth->fetchall_hashref('TABLE_NAME');
+    my $has_version = exists $existing_tables->{$AUTOCREATE_TABLES_TABLE};
+    $sth->finish;
+
+    while (my ($t, $versions) = each %$tables) {
+        $class->__autocreate_one_table($t, $versions, $has_version);
+    }
+}
+
+sub __autocreate_one_table {
+    my ($class, $t, $versions, $has_version) = @_;
+    my $dbh = $class->get_dbh;
+    my $cv = -1;
+    if ($has_version) {
+        my $sql = $dbh->prepare("SELECT TB_version FROM $AUTOCREATE_TABLES_TABLE WHERE TB_name = ?");
+        $sql->execute($t);
+        ($cv) = $sql->fetchrow_array;
+        $sql->finish;
+        if (!defined $cv) {
+            $cv = -1;
+            $sql = $dbh->prepare("INSERT INTO $AUTOCREATE_TABLES_TABLE (TB_name, TB_version) VALUES (?, ?)");
+            $sql->execute($t, $cv);
+            $sql->finish;
+        }
+    }
+    my $sql_insert = $dbh->prepare("INSERT INTO $AUTOCREATE_TABLES_TABLE (TB_name, TB_version) VALUES (?, ?)");
+    my $sql_delete = $dbh->prepare("DELETE FROM $AUTOCREATE_TABLES_TABLE WHERE TB_name = ?");
+    foreach my $v (sort keys %$versions) {
+        if ($v > $cv) {
+            # print STDERR "$versions->{$v}\n";
+            my @statements = split($AUTOCREATE_SPLIT_SQLS, $versions->{$v});
+            foreach my $sql (@statements) {
+                $sql =~ s/#.*$//mg;
+                $sql =~ s/^\s+//;
+                $sql =~ s/\s+$//;
+                $sql =~ s/,\s*\)/)/g;
+                if ($sql) {
+                    print STDERR "  $sql\n";
+                    $dbh->do($sql);
+                }
+            }
+            $sql_delete->execute($t);
+            $sql_insert->execute($t, $v);
+        }
+    }
+    $sql_insert->finish;
+    $sql_delete->finish;
+}
+
+sub __autocreate_parse_lines {
+    my ($class, $lines) = @_;
+    my ($h, $ct, $cv, $cs) = ({}, undef, undef, undef);
+    my $doit = sub {
+        if (defined $ct) {
+            $h->{$ct} ||= {};
+            $cs =~ s/^\s+//;
+            $cs =~ s/\s+$//;
+            $h->{$ct}{$cv} = $cs;
+        }
+    };
+    foreach my $i (@$lines) {
+        if ($i =~ $AUTOCREATE_LINE_RE) {
+            &$doit;
+            $ct = $1;
+            $cv = $2;
+            $cs = '';
+        } elsif (defined $ct) {
+            $cs .= $i;
+        }
+    }
+    &$doit;
+    # print STDERR Data::Dumper::Dumper($h);
+    return $h;
+}
 
 =head1 CAVEATS
 
@@ -1672,3 +1816,50 @@ SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGES.
 
 =cut
+
+
+
+
+
+
+
+package SQL::Abstract::WithLimit;
+use base 'SQL::Abstract';
+
+### MySQL and Postgres syntax; Buzz off for others. :-p
+sub select {
+    my ($self, $table, $cols, $where, $order, $limit, $offset) = @_;
+    my ($sql, @bind) = $self->SUPER::select($table, $cols, $where, $order);
+    $sql .= $self->order_and_limit(undef, $limit, $offset);
+    return wantarray ? ($sql, @bind) : $sql;
+}
+
+sub _order_by {
+    my $self = shift;
+    my $ref = ref $_[0];
+
+    my @vals = $ref eq 'ARRAY'  ? @{$_[0]} :
+               $ref eq 'SCALAR' ? ${$_[0]} :
+               $ref eq ''       ? $_[0]    :
+               SQL::Abstract::puke("Unsupported data struct $ref for ORDER BY");
+
+    my $val = join ', ', map {
+        s/^\^// ?
+          $self->_quote($_) . $self->_sqlcase(' desc')
+            : $self->_quote($_)
+        } @vals;
+    return $val ? $self->_sqlcase(' order by')." $val" : '';
+}
+
+sub order_and_limit {
+    my ($self, $order, $limit, $offset) = @_;
+    my $q = $order ? $self->_order_by($order) : '';
+    if (defined $limit) {
+        $q .= " LIMIT $limit";
+        $q .= " OFFSET $offset"
+          if defined $offset;
+    }
+    return $q;
+}
+
+*quote_field = \&SQL::Abstract::_quote;

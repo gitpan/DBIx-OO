@@ -1,5 +1,10 @@
 Revision history for DBIx-OO
 
+0.0.6    Sep 29, 2007
+
+         Added a rudimentary DB auto-create/upgrade facility.
+         Some minor other changes as well (I forgot).
+
 0.0.5    Jul 03, 2007
 
          Minor fixes, added tree_get_next / tree_get_prev functions in
