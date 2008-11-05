@@ -1,5 +1,14 @@
 Revision history for DBIx-OO
 
+0.0.7    Nov 5, 2008
+
+         Minor changes but releasing a new version to support some
+         projects I'm working on:
+
+         - $obj->retrieve will re-fetch data from DB
+         - $package->update will now be able to update more rows
+         - fixed some problems with autocreate
+
 0.0.6    Sep 29, 2007
 
          Added a rudimentary DB auto-create/upgrade facility.

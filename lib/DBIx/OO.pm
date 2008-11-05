@@ -4,9 +4,10 @@ use base qw(Class::Data::Inheritable);
 
 use warnings;
 use strict;
-use Carp;
+use Carp ();
+use Encode ();
 
-use version; our $VERSION = qv('0.0.6');
+use version; our $VERSION = qv('0.0.7');
 
 use DBI ();
 use SQL::Abstract ();
@@ -28,6 +29,19 @@ my %INVALID_FIELD_NAMES = ( id      => 1,
                             get     => 1,
                             count   => 1,
                           );
+
+use vars qw( $HAS_WEAKEN );
+
+BEGIN {
+    $HAS_WEAKEN = 1;
+    eval {
+        require Scalar::Util;
+        import Scalar::Util qw(weaken);
+    };
+    if ($@) {
+        $HAS_WEAKEN = 0;
+    }
+}
 
 sub __T { my $c = $_[0]; ref $c || $c; }
 
@@ -331,9 +345,14 @@ sub columns {
     my $hash = {};
     while (my ($group, $v) = each %$all) {
         foreach my $colname (@$v) {
+            my $wtf8;
+            if ($colname =~ /^!/) {
+                $colname = substr($colname, 1);
+                $wtf8 = 1;
+            }
             my $closname = get_accessor_name($colname);
             no strict 'refs';
-            *{"$class\::$closname"} = __COL_CLOSURE($colname);
+            *{"$class\::$closname"} = __COL_CLOSURE($colname, $wtf8);
             $hash->{$colname} = $group;
         }
     }
@@ -483,11 +502,23 @@ sub id {
 }
 
 sub __COL_CLOSURE {
-    my ($col) = @_;
-    sub {
-        my $self = shift;
-        @_ > 0 ? $self->set($col, @_) : $self->get($col);
-    };
+    my ($col, $wtf8) = @_;
+    if (!$wtf8) {
+        return sub {
+            my $self = shift;
+            @_ > 0 ? $self->set($col, @_) : $self->get($col);
+        };
+    } else {
+        return sub {
+            my $self = shift;
+            if (@_ > 0) {
+                my @a = map { _to_utf8($_) } @_;
+                return $self->set($col, @a);
+            } else {
+                return $self->get($col);
+            }
+        };
+    }
 }
 
 =head2 C<transaction_start()>, C<transaction_rollback()>, C<transaction_commit()>
@@ -1011,13 +1042,13 @@ sub has_mapping {
             my %where = ();
             my ($st, $tt, $mt) = ($self->table, $type->table, $maptype->table);
             while (my ($k, $v) = each %$arg1) {
-                my $tmp = '= ' . $sa->quote_field("$mt.$v");
+                my $tmp = '= ' . $sa->_quote("$mt.$v");
                 $where{"$st.$k"} = \$tmp; # SCALAR ref means literal SQL
                 $where{"$mt.$v"} = $self->get($k);
                 push @keys, $k; # remember these keys to reconstruct @bind later
             }
             while (my ($k, $v) = each %$arg2) {
-                my $tmp = '= ' . $sa->quote_field("$tt.$v");
+                my $tmp = '= ' . $sa->_quote("$tt.$v");
                 $where{"$mt.$k"} = \$tmp; # SCALAR ref means literal SQL
             }
             $tcols = $type->_get_columns([ 'P', 'E' ]);
@@ -1150,19 +1181,23 @@ Returns undef if no objects were found.
 =cut
 
 sub retrieve {
-    my $class = __T(shift);
-    my $obj = $class->new;
-    if (!ref $_[0]) {
-        if (scalar @_ == 1) {
+    my $class = __T($_[0]);
+    my $self = shift;
+    my $obj;
+    if (ref $self) {            # refresh existing object
+        $obj = $self;
+        # reset values
+        $obj->{values} = $self->_get_pk_where;
+        $obj->{modified} = {};
+    } else {                    # create new object
+        $obj = $class->new;
+        if (!ref $_[0]) {
             my $pk = $class->columns('P');
             @{$obj->{values}}{@$pk} = @_;
-        } else {
-            my %h = @_;
-            @{$obj->{values}}{keys %h} = values %h;
+        } elsif (ref $_[0] eq 'HASH') {
+            my ($h) = @_;
+            @{$obj->{values}}{keys %$h} = values %$h;
         }
-    } elsif (ref $_[0] eq 'HASH') {
-        my ($h) = @_;
-        @{$obj->{values}}{keys %$h} = values %$h;
     }
     eval {
         $obj->_retrieve_columns([ 'P', 'E' ]);
@@ -1179,23 +1214,45 @@ sub retrieve {
 
     $a = Users->search({ created => [ '>=', '2006-01-01 00:00:00' ]});
 
-Searches the database and returns an array of objects (as array
-reference) that match the search criteria.  All arguments are
-optional.  If you pass no arguments, it will return an array
-containing all objects in the DB.  The syntax of C<$where> and
-C<$order> are described in L<SQL::Abstract|SQL::Abstract>.
+Searches the database and returns an array of objects that match the
+search criteria.  All arguments are optional.  If you pass no
+arguments, it will return an array containing all objects in the DB.
+The syntax of C<$where> and C<$order> are described in
+L<SQL::Abstract|SQL::Abstract>.
+
+In scalar context it will return a reference to the array.
 
 The C<$limit> and C<$offset> arguments are added by DBIx::OO and allow you
 to limit/paginate your query.
+
+UPDATE 0.0.7:
+
+Certain queries are difficult to express in SQL::Abstract syntax.  The
+search accepts a literal WHERE clause too, but until version 0.0.7
+there was no way to specify bind variables.  For example, now you can
+do this:
+
+    @admins = Users->search("mode & ? <> 0 and created > ?",
+                            undef, undef, undef,
+                            MODE_FLAGS->{admin},
+                            strftime('%Y-%m-%d', localtime)).
+
+In order to pass bind variables, you must pass order, limit and offset
+(give undef if you don't care about them) and add your bind variables
+immediately after.
 
 =cut
 
 sub search {
     my $class = __T(shift);
     my ($where, $order, $limit, $offset) = @_;
+    splice @_, 0, 4;
     my $sa = $class->get_sql_abstract;
     my $cols = $class->_get_columns([ 'P', 'E' ]);
     my ($sql, @bind) = $sa->select($class->table, $cols, $where, $order, $limit, $offset);
+    if (@_) {
+        push @bind, @_;
+    }
     my $sth = $class->_run_sql($sql, \@bind);
     my @ret = ();
     while (my $row = $sth->fetchrow_arrayref) {
@@ -1226,8 +1283,15 @@ Saves any modified columns to the database.
 =cut
 
 sub update {
-    my $self = shift;
-    $self->_do_update;
+    my $class = shift;
+    if (ref $class) {
+        $class->_do_update;
+    } else {
+        my ($fieldvals, $where) = @_;
+        my $sa = $class->get_sql_abstract;
+        my ($sql, @bind) = $sa->update($class->table, $fieldvals, $where);
+        $class->_run_sql($sql, \@bind);
+    }
 }
 
 =head2 C<delete>
@@ -1473,6 +1537,20 @@ sub _apply_defaults {
     }
 }
 
+## thanks Altblue!
+sub _to_utf8 {
+    my ($str) = @_;
+    return $str
+      if Encode::is_utf8($str);
+    eval {
+        $str = Encode::decode_utf8($str);
+    };
+    if ($@) {
+        $str = Encode::decode('Detect', $str);
+    }
+    return $str;
+}
+
 =head2 C<disable_fk_checks()>, C<enable_fk_checks()>
 
 Enable or disable foreign key checks in the backend DB server.  These
@@ -1576,8 +1654,8 @@ need to.
 
 sub autocreate {
     my ($class, @packages) = @_;
-    $class->transaction_start;
     $class->disable_fk_checks;
+    $class->transaction_start;
     eval {
         use Module::Load qw( load );
 
@@ -1588,27 +1666,30 @@ sub autocreate {
         # autocreate other packages that were passed
         foreach my $pak (@packages) {
             load $pak;
-            eval {
-                @sql_lines = split(/^/m, $pak->get_autocreate_data());
-                $class->__do_autocreate(@sql_lines);
-            };
+            @sql_lines = split(/^/m, $pak->get_autocreate_data());
+            $class->__do_autocreate(@sql_lines);
         }
     };
     if ($@) {
         $class->transaction_rollback;
-        print STDERR "\n\n*** There was a problem auto-creating or upgrading tables, can't continue ***\n\n";
+        print STDERR "\033[1;31m- There was a problem auto-creating or upgrading tables, can't continue -\033[0m\n";
         die $@;
     } else {
         $class->transaction_commit;
     }
+    foreach my $pak (@packages) {
+        $pak->autopopulate;
+    }
     $class->enable_fk_checks;
 }
+
+sub autopopulate {}
 
 sub get_autocreate_data {q{
     #### (_dbix_oo_versions:0) ####
 
     CREATE TABLE _dbix_oo_versions ( TB_name VARCHAR(255) PRIMARY KEY,
-                                     TB_version INTEGER UNSIGNED );
+                                     TB_version INTEGER );
 }}
 
 my $AUTOCREATE_LINE_RE = qr/^\s*####\s*\(([a-z0-9_-]+):([0-9]+)\)\s*####\s*$/i;
@@ -1660,7 +1741,9 @@ sub __autocreate_one_table {
                 $sql =~ s/\s+$//;
                 $sql =~ s/,\s*\)/)/g;
                 if ($sql) {
-                    print STDERR "  $sql\n";
+                    # print STDERR "  $sql\n";
+                    my $n = index($sql, "\n");
+                    print STDERR "... $t: " . substr($sql, 0, $n) . "\n";
                     $dbh->do($sql);
                 }
             }
@@ -1854,11 +1937,10 @@ sub _order_by {
 sub order_and_limit {
     my ($self, $order, $limit, $offset) = @_;
     my $q = $order ? $self->_order_by($order) : '';
-    if (defined $limit) {
-        $q .= " LIMIT $limit";
-        $q .= " OFFSET $offset"
-          if defined $offset;
-    }
+    $q .= " LIMIT $limit"
+      if defined $limit;
+    $q .= " OFFSET $offset"
+      if defined $offset;
     return $q;
 }
 
