@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                DBIx-OO
-version:             0.0.7
+version:             0.0.8
 abstract:            Database to Perl objects abstraction
 license:             ~
 author:              
@@ -10,8 +10,10 @@ distribution_type:   module
 requires:     
     Class::Data::Inheritable:      0
     DBI:                           0
+    Module::Load:                  0
     SQL::Abstract:                 0
     Test::More:                    0
+    Test::Pod::Coverage:           0
     version:                       0
 meta-spec:
     url:     http://module-build.sourceforge.net/META-spec-v1.3.html

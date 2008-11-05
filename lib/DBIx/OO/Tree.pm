@@ -713,6 +713,16 @@ sub tree_get_path {
     return wantarray ? @ret : \@ret;
 }
 
+=head2 tree_get_next_sibling, tree_get_prev_sibling
+
+XXX: this info may be inaccurate
+
+Return the next/previous item in the tree view.  C<$args> has the same
+significance as in L</tree_get_path>.  $args->{id} defines the
+reference node; if missing, it's assumed to be $self.
+
+=cut
+
 sub tree_get_next_sibling {
     my ($self, $args) = @_;
     my $id;
@@ -766,6 +776,16 @@ sub tree_get_prev_sibling {
     }
     return undef;
 }
+
+=head2 tree_get_next, tree_get_prev
+
+XXX: this info may be inaccurate
+
+Similar to L</tree_get_next_sibling> / L</tree_get_prev_sibling> but
+allow $args->{where} to contain a WHERE clause (in SQL::Abstract
+format) and returns the next/prev item that matches the criteria.
+
+=cut
 
 sub tree_get_next {
     my ($self, $args) = @_;

@@ -1,5 +1,10 @@
 Revision history for DBIx-OO
 
+0.0.8    Nov 5, 2008
+
+         Added (succinct) POD for naked subroutines, and more
+         prerequisites, so that build won't fail.
+
 0.0.7    Nov 5, 2008
 
          Minor changes but releasing a new version to support some

@@ -7,7 +7,7 @@ use strict;
 use Carp ();
 use Encode ();
 
-use version; our $VERSION = qv('0.0.7');
+use version; our $VERSION = qv('0.0.8');
 
 use DBI ();
 use SQL::Abstract ();
@@ -1683,7 +1683,20 @@ sub autocreate {
     $class->enable_fk_checks;
 }
 
+=head2 autopopulate
+
+This is supposed to initialize tables.  Untested and may not work --
+don't use it.
+
+=cut
+
 sub autopopulate {}
+
+=head2 get_autocreate_data
+
+See the documentation of L</autocreate>.
+
+=cut
 
 sub get_autocreate_data {q{
     #### (_dbix_oo_versions:0) ####

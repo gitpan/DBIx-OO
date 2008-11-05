@@ -13,6 +13,8 @@ WriteMakefile
    PREREQ_PM           => {
                            'version'                   => 0,
                            'Test::More'                => 0,
+                           'Test::Pod::Coverage'       => 0,
+                           'Module::Load'              => 0,
                            'Class::Data::Inheritable'  => 0,
                            'SQL::Abstract'             => 0,
                            'DBI'                       => 0,
