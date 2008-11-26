@@ -7,7 +7,7 @@ use strict;
 use Carp ();
 use Encode ();
 
-use version; our $VERSION = qv('0.0.8');
+use version; our $VERSION = qv('0.0.9');
 
 use DBI ();
 use SQL::Abstract ();
@@ -819,12 +819,13 @@ sub has_a {
             my $sth = $class->_run_sql($sql, \@bind);
             my @ret;
             my $slicepoint = scalar(@$c1) - 1;
+            my $end = $slicepoint + scalar(@$c2);
             while (my $row = $sth->fetchrow_arrayref) {
                 my $obj = {};
                 my $o1 = $obj->{$t1} = $class->new;
                 my $o2 = $obj->{$t2} = $type->new;
                 @{$o1->{values}}{@$c1} = @{$row}[0..$slicepoint];
-                @{$o2->{values}}{@$c2} = @{$row}[$slicepoint+1..$#{@$row}];
+                @{$o2->{values}}{@$c2} = @{$row}[$slicepoint+1..$end];
                 push @ret, $obj;
             }
             return @ret;

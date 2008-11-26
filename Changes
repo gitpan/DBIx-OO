@@ -1,5 +1,12 @@
 Revision history for DBIx-OO
 
+0.0.9    Nov 26, 2008
+
+         Fixed bug in search_join_X methods: $#{@$row} no longer works
+         to determine the index of the last element in an array ref,
+         it returns -1 instead.  Either it never worked (but AFAIR it
+         did) or it somehow broke in Perl 5.10.
+
 0.0.8    Nov 5, 2008
 
          Added (succinct) POD for naked subroutines, and more
